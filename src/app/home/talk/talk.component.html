@@ -1,0 +1,41 @@
+<header>
+  {{room}}
+</header>
+
+<main>
+  <div class="media-list">
+
+  </div>
+  <div class="message-box">
+    <div class="message" *ngFor="let item of messages">
+      <div class="content">
+        <div *ngIf="item.contentType === 'text'">
+          {{item.content}}
+        </div>
+        <div *ngIf="item.contentType === 'image'">
+          <!-- <img src="default.png" *ngIf="!item.download"> -->
+          <img [src]="item.content" *ngIf="item.download">
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <form class="sender" (ngSubmit)="send()" #sendForm="ngForm">
+    <input type="text" required [(ngModel)]="messageContent" name="messageContent">
+    <button [disabled]="sendForm.form.invalid || sending">send</button>
+  </form>
+  <div class="transfer">
+    <label>
+      <input type="file" (change)="transferFile($event)" #file>
+    </label>
+  </div>
+</footer>
+
+<!-- <div style="width: 300px;height: 500px;">
+  <app-rtc-local room="hi"></app-rtc-local>
+</div>
+<div>
+  <app-rtc-remote *ngFor="let item of mediaList" [width]="50" [height]="50" [key]="item"></app-rtc-remote>
+</div> -->

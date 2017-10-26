@@ -3,8 +3,8 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "ng": "ng",
-    "start": "ng serve",
+    "ng": "./node_modules/.bin/ng",
+    "start": "ng serve --ssl --open --host 192.168.0.123 --port 4500",
     "build": "ng build",
     "test": "ng test",
     "lint": "ng lint",

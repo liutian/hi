@@ -1,0 +1,4 @@
+<form (submit)="login()" #loginForm="ngForm">
+  <input type="text" [(ngModel)]="loginFormData.loginName" name="loginName" required pattern="^\w+$" placeholder="请输入字母/数字的组合">
+  <button [disabled]="loginForm.form.invalid">登录</button>
+</form>

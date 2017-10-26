@@ -1,0 +1,30 @@
+<video autoplay #video></video>
+
+<div class="control">
+  <div class="top-bar">
+    <div>
+      <i class="fa fa-fw" [ngClass]="{'fa-microphone': localMedia.mediaMode !== 'audio'}" *ngIf="!localMedia.isMute" (click)="toggleMute(true)">&nbsp;</i>
+      <i class="fa fa-fw" [ngClass]="{'fa-microphone-slash': localMedia.mediaMode !== 'audio'}" *ngIf="localMedia.isMute" (click)="toggleMute(false)">&nbsp;</i>
+    </div>&nbsp;
+
+    <div>
+      {{runTime}}
+    </div>&nbsp;
+
+    <div>
+      <i class="fa  fa-fw" [ngClass]="{'fa-refresh': localMedia.devices?.videoinput.length > 1}" (click)="toggleFacingMode()">&nbsp;</i>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <i class="fa fa-angle-left fa-fw"></i>
+
+    <div class=" control-btn">
+      <i class="fa fa-stop fa-fw" *ngIf="localMedia.status === 'sending'" (click)="stop()"></i>
+      <i class="fa fa-play fa-fw" *ngIf="localMedia.status === 'stop'" (click)="run()" style="margin-right: -8px;"></i>
+    </div>
+
+    <i class="fa fa-video-camera fa-fw" *ngIf="localMedia.mediaMode === 'audio'" (click)="toggleMediaMode('video')"></i>
+    <i class="fa fa-volume-up fa-fw" *ngIf="localMedia.mediaMode === 'video'" (click)="toggleMediaMode('audio')"></i>
+  </div>
+</div>

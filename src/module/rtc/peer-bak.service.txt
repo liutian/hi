@@ -1,0 +1,530 @@
+import { Injectable, Inject, Optional } from '@angular/core';
+import { Subject } from 'rxjs/Subject';
+
+import { SocketService } from './socket.service';
+
+@Injectable()
+export class PeerService {
+  public remoteShare = new Subject();
+  public remoteShareCancel = new Subject();
+  public newDataChannel = new Subject();
+  public localMedia = {
+    videoDeviceId: undefined,
+    devices: null,
+    status: 'stop',
+    isMute: false,
+    stream: null,
+    startTime: 0,
+    mediaMode: 'video',
+    room: '',
+    width: null,
+    height: null,
+    aspectRatio: undefined
+  };
+  auth: string;
+  private peers: { [propName: string]: RTCPeerConnection } = {};
+  // 只有和本地mediaStream相关的peer,也就是本地createOffer 产生的相应peer
+  private mediaPeers: { [propName: string]: RTCPeerConnection } = {};
+  private peerDefaultConfig = {};
+  private socket: any;
+
+  constructor(
+    private socketService: SocketService,
+    @Inject('peerConfig') @Optional() private peerConfig: any) {
+    this.auth = Number(Math.floor(Math.random() * 10000000)).toString(32);
+  }
+
+  public setSocket(socket) {
+    this.socket = socket;
+    socket.on('push', (data) => {
+      if (!data.pushData || !data.pushData.peer || !data.pushData.target || data.pushData.target !== socket._key) {
+        return;
+      }
+
+      const pushData = data.pushData;
+      // remote create offer
+      if (pushData.type === 'offer' && pushData.auth === this.auth) {
+        if (!this.peers[pushData.from]) {
+          this.newPeer(pushData.from);
+        }
+        this.createAnswer(pushData.from, pushData.data);
+      } else if (pushData.type === 'answer') { // remote create offer
+        if (!this.peers[pushData.from]) {
+          console.error('receive answer but there no peer');
+          return;
+        }
+
+        const peer = this.getPeer(pushData.from);
+        peer.setRemoteDescription(pushData.data).then(() => {
+          // console.info('setRemoteDescription answer success ');
+        }).catch((e) => {
+          console.error('setRemoteDescription answer error');
+        });
+        peer._offerReady = false;
+      } else if (pushData.type === 'icecandidate') {// remote icecandidate
+        if (!this.peers[pushData.from]) {
+          console.error('receive icecandidate but there no peer');
+          return;
+        }
+
+        this.peers[pushData.from].addIceCandidate(pushData.data).then(() => {
+          // console.info('addIceCandidate success');
+        }).catch((e) => {
+          console.error('addIceCandidate error' + e);
+        });
+      } else if (pushData.type === 'offerConfirm') {// remote agree to receive offer
+        this.startOffer(pushData.from, pushData.auth);
+      } else if (pushData.type === 'closeMedia') {
+        this.remoteShareCancel.next(pushData.from);
+        this.closePeer(pushData.from);
+      }
+    });
+
+    socket.on('push', (data) => {
+      // remote will create offer
+      if (data.pushData && data.pushData.peer && data.pushData.type === 'preOffer' && data.pushData.from !== socket._key) {
+        this.remoteShare.next(data.pushData);
+      }
+    });
+  }
+
+  // 根据key 生成本地和对端直接的peer实例，key为对端标示
+  public newPeer(key, render?: HTMLVideoElement) {
+    this.closePeer(key);
+
+    const peer = this.createPeer(key, this.peerConfig || {});
+    peer._render = render;
+    this.peers[key] = peer;
+
+    return this.peers[key];
+  }
+
+  public getPeer(key, set?: boolean) {
+    if (!this.peers[key] && set === true) {
+      return this.newPeer(key);
+    }
+
+    return this.peers[key];
+  }
+
+  // 同意远程连接
+  public agreeShare(remoteKey) {
+    this.socket._pushMsg({
+      room: 'user_' + this.socketService.parseUserId(remoteKey),
+      pushData: {
+        peer: true,
+        type: 'offerConfirm',
+        from: this.socket._key,
+        auth: this.auth,
+        target: remoteKey
+      }
+    });
+
+    const peer = this.getPeer(remoteKey);
+    if (peer) {// mark
+      this.createOffer(remoteKey, peer._auth);
+    }
+  }
+
+  public sendMediaStream(room) {
+    if (!room) {
+      throw new Error('there no room');
+    }
+    if (!this.localMedia.stream) {
+      throw new Error('there no media stream');
+    }
+
+    this.localMedia.startTime = Date.now();
+    this.localMedia.status = 'sending';
+    this.localMedia.room = room;
+    this.socket._pushMsg({
+      room: room,
+      pushData: {
+        peer: true,
+        type: 'preOffer',
+        from: this.socket._key,
+        target: room
+      }
+    });
+  }
+
+  public stopSendMediaStream() {
+    this.localMedia.startTime = 0;
+    this.closeMediaPeers();
+    this.localMedia.status = 'stop';
+  }
+
+  public setMute(isMute) {
+    this.localMedia.isMute = isMute;
+    if (!this.localMedia.stream) {
+      return;
+    }
+
+    this.localMedia.stream.getAudioTracks().forEach(track => {
+      track.enabled = !isMute;
+    });
+
+    if (isMute) {
+      this.removeMediaTracks('audio');
+    } else {
+      this.addMediaTracks('audio');
+    }
+  }
+
+  // 获取本地摄像头
+  public getLocalMedia({ mediaMode, videoDeviceChange, aspectRatio, width, height }: any): Promise<MediaStream> {
+    if (!this.localMedia.devices) {
+      this.enumerateDevices();
+    }
+    if (this.localMedia.stream) {
+      this.stopSendMediaStream();
+    }
+
+    if (mediaMode) {
+      this.localMedia.mediaMode = mediaMode;
+    }
+    // 无法通过facingMode自动选择摄像头，只能根据deviceId来确定
+    if (videoDeviceChange) {
+      const devices = this.localMedia.devices.videoinput;
+      let index = devices.findIndex((device => {
+        return device.deviceId === this.localMedia.videoDeviceId;
+      }));
+
+      if (index === -1) {
+        index = 0;
+      }
+      this.localMedia.videoDeviceId = devices[(index + 1) % devices.length].deviceId;
+    }
+    if (aspectRatio) {
+      this.localMedia.aspectRatio = aspectRatio;
+    }
+    if (width) {
+      this.localMedia.width = { ideal: width };
+    }
+    if (height) {
+      this.localMedia.height = { ideal: height };
+    }
+
+    const constraints = this.createConstraints(this.localMedia.mediaMode, this.localMedia.videoDeviceId,
+      this.localMedia.aspectRatio, this.localMedia.width, this.localMedia.height);
+    return navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+      this.localMedia.stream = stream;
+      return stream;
+    }).catch(e => {
+      if (e.name === 'ConstraintNotSatisfiedError') {
+        alert('设备无法满足要求');
+      } else if (e.name === 'PermissionDeniedError') {
+        alert('用户禁止');
+      }
+    });
+  }
+
+  public closeAllPeer() {
+    this.stopSendMediaStream();
+    Object.keys(this.peers).forEach(key => {
+      this.closePeer(key);
+    });
+  }
+
+
+  private closeMediaPeers() {
+    Object.keys(this.mediaPeers).forEach(key => {
+      this.closePeer(key);
+      this.socket._pushMsg({
+        room: 'user_' + this.socketService.parseUserId(key),
+        pushData: {
+          peer: true,
+          type: 'closeMedia',
+          from: this.socket._key,
+          target: key
+        }
+      });
+    });
+  }
+
+  private enumerateDevices() {
+    return navigator.mediaDevices.enumerateDevices().then((deviceInfos) => {
+      this.localMedia.devices = {
+        audioinput: [],
+        audiooutput: [],
+        videoinput: []
+      };
+
+      deviceInfos.forEach(device => {
+        if (device.kind === 'audioinput') {
+          this.localMedia.devices.audioinput.push(device);
+        } else if (device.kind === 'audiooutput') {
+          this.localMedia.devices.audiooutput.push(device);
+        } else if (device.kind === 'videoinput') {
+          this.localMedia.devices.videoinput.push(device);
+        }
+      });
+
+    });
+  }
+
+  private startOffer(remoteKey, remoteAuth) {
+    if (!this.localMedia.stream) {
+      console.error('localMedia stream no exist');
+      return;
+    }
+
+    let peer = this.getPeer(remoteKey);
+    if (!peer) {
+      peer = this.newPeer(remoteKey);
+    }
+
+    this.mediaPeers[remoteKey] = peer;
+    // 首先将本地媒体流加入peer中，这一步很重要，必须在创建offer之前设置
+    this.localMedia.stream.getTracks().forEach(track => {
+      peer.addTrack(track, this.localMedia.stream);
+    });
+
+    if (!peer.localDescription.type || peer.localDescription.type === 'offer') {
+      this.createOffer(remoteKey, remoteAuth);
+    } else if (peer.localDescription.type === 'answer') {// mark
+      // console.info('wait for createOffer');
+      // this.peerService.createAnswer(msg.data.pushData.from, peer.remoteDescription);
+    }
+  }
+
+  // 发起Offer
+  public createOffer(remoteKey: string, auth?: string) {
+    const peer = this.peers[remoteKey];
+    if (peer._offerReady === true) {
+      return;
+    }
+    peer._offerReady = true;
+    peer._auth = auth;
+    // 创建offer
+    peer.createOffer().then((offer) => {
+      // 将offer设置localDescription
+      peer.setLocalDescription(offer).then(() => {
+        // 发送offer
+        this.socket._pushMsg({
+          room: 'user_' + this.socketService.parseUserId(remoteKey),
+          pushData: {
+            peer: true,
+            type: 'offer',
+            data: offer, // json
+            target: remoteKey,
+            from: this.socket._key,
+            auth: auth
+          }
+        });
+      }).catch((e) => {
+        console.error('setLocalDescription error' + e);
+      });
+    }).catch((error) => {
+      console.error(`remoteKey: ${remoteKey} createOffer fail: ${error}`);
+    });
+  }
+
+  // 回复answer
+  private createAnswer(remoteKey: string, offer) {
+    const peer = this.peers[remoteKey];
+    // 首先将远程的offer设置为remoteDescription
+    peer.setRemoteDescription(offer).then(() => {
+      // 接着创建answer
+      peer.createAnswer().then((answer) => {
+        // 将answer设置为localDescription
+        peer.setLocalDescription(answer).then(() => {
+          // 发送answer
+          this.socket._pushMsg({
+            room: 'user_' + this.socketService.parseUserId(remoteKey),
+            pushData: {
+              peer: true,
+              type: 'answer',
+              data: answer,
+              target: remoteKey,
+              from: this.socket._key
+            }
+          });
+        }).catch((e) => {
+          console.error('setLocalDescription error' + e);
+        });
+      }).catch((error) => {
+        console.error(`remoteKey: ${remoteKey} createAnswer fail : ${error}`);
+      });
+    }).catch((e) => {
+      console.error('setRemoteDescription error' + e);
+    });
+
+  }
+
+  // 建立和远端的对等链接
+  private createPeer(remoteKey, config) {
+    // 初始化peer实例
+    const peer = new RTCPeerConnection(Object.assign(this.peerDefaultConfig, config));
+
+    peer.addEventListener('datachannel', (e: any) => {
+      this.newDataChannel.next({
+        peer: peer,
+        channel: e.channel
+      });
+    });
+
+    // 监听关闭事件
+    peer.addEventListener('close', (e) => {
+      if (this.peers[remoteKey] !== peer) {
+        return;
+      }
+
+      this.remoteShareCancel.next(remoteKey);
+      delete this.peers[remoteKey];
+    });
+
+    peer.addEventListener('iceconnectionstatechange', (e) => {
+      // new , checking , connected , completed , failed , disconnected , closed
+      console.log('peer iceconnectionstatechange : ' + peer.iceConnectionState);
+      if (/(closed|failed)/ig.test(peer.iceConnectionState) && this.peers[remoteKey] === peer && peer.signalingState !== 'closed') {
+        this.closePeer(remoteKey);
+        this.remoteShareCancel.next(remoteKey);
+      }
+    });
+
+    peer.addEventListener('icegatheringstatechange', (e) => {
+      // new , gathering , complete
+      console.log('peer icegatheringstatechange : ' + peer.iceGatheringState);
+    });
+
+    peer.addEventListener('signalingstatechange', (e) => {
+      // stable , have-local-offer , have-remote-offer , have-local-pranswer , have-remote-pranswer
+      console.log('peer signalingstatechange : ' + peer.signalingState);
+    });
+
+    peer.addEventListener('connectionstatechange', (e) => {
+      // new , connection , connected , disconnected , failed , closed
+      console.log('peer connectionState : ' + peer.connectionState);
+    });
+
+    // 监听异常报错事件
+    peer.addEventListener('error', (e) => {
+      console.error('peer error ' + e);
+      this.closePeer(remoteKey);
+    });
+
+    // 监听地址探测事件
+    peer.addEventListener('icecandidate', (e) => {
+      if (!e.candidate) { // mark
+        return;
+      }
+      // 将探测信息发送到对端
+      this.socket._pushMsg({
+        room: 'user_' + this.socketService.parseUserId(remoteKey),
+        pushData: {
+          peer: true,
+          type: 'icecandidate',
+          data: e.candidate,
+          from: this.socket._key,
+          target: remoteKey
+        }
+      });
+    });
+    // 监听地址变化事件
+    peer.addEventListener('negotiationneeded', (e) => {// mark
+      // console.info('negotiationneeded');
+      // if (!peer.localDescription.sdp || peer.localDescription.type === 'offer') {
+      //   this.createOffer(key);
+      // } else if (peer.localDescription.type === 'answer') {
+      //   this.createAnswer(key, peer.remoteDescription);
+      // }
+    });
+    // 监听对端音视频变化
+    peer.addEventListener('track', (e: any) => {
+      if (!peer._render) {
+        console.error('there no render');
+        return;
+      }
+
+      // if (peer._render.srcObject) {// mark
+      peer._render.srcObject = e.streams[0];
+      // }
+    });
+
+    return peer;
+  }
+
+  private closePeer(key: string) {
+    const peer = this.peers[key] || this.mediaPeers[key];
+    if (peer && peer.signalingState !== 'closed') {
+      peer.close();
+    }
+    delete this.peers[key];
+    delete this.mediaPeers[key];
+  }
+
+  private createConstraints(mediaMode, videoDeviceId, aspectRatio, width, height) {
+    const constraints: any = {
+      video: {
+        frameRate: 30
+      },
+      audio: {
+        // autoGainControl: true,
+        // echoCancellation: true,
+        // noiseSuppression: true,
+        // latency: 1,
+        // sampleRate: 1,
+        // sampleSize: 1,
+        // volume: 1
+      }
+    };
+
+    if (mediaMode === 'video') {
+      if (aspectRatio) {
+        constraints.video.aspectRatio = aspectRatio;
+      }
+      if (videoDeviceId) {
+        constraints.video.deviceId = { exact: videoDeviceId };
+      }
+      if (width) {
+        constraints.video.width = { exact: width };
+      }
+      if (height) {
+        constraints.video.height = { exact: height };
+      }
+    } else if (mediaMode === 'audio') {
+      constraints.video = false;
+      constraints.audio = true;
+    }
+
+    return constraints;
+  }
+
+  private removeMediaTracks(kind?) {
+    Object.keys(this.mediaPeers).forEach((key) => {
+      const peer = this.mediaPeers[key];
+      peer.getSenders().forEach((sender) => {
+        if (kind) {
+          if (kind === 'video' && sender.track.kind === 'video') {
+            peer.removeTrack(sender);
+          } else if (kind === 'audio' && sender.track.kind === 'audio') {
+            peer.removeTrack(sender);
+          }
+        } else {
+          peer.removeTrack(sender);
+        }
+      });
+    });
+  }
+
+  private addMediaTracks(kind?) {
+    Object.keys(this.mediaPeers).forEach((key) => {
+      const peer = this.mediaPeers[key];
+      if (kind === 'audio') {
+        this.localMedia.stream.getAudioTracks().forEach(track => {
+          peer.addTrack(track, this.localMedia.stream);
+        });
+      } else if (kind === 'video') {
+        this.localMedia.stream.getVideoTracks().forEach(track => {
+          peer.addTrack(track, this.localMedia.stream);
+        });
+      } else if (kind === undefined) {
+        this.localMedia.stream.getTracks().forEach(track => {
+          peer.addTrack(track, this.localMedia.stream);
+        });
+      }
+    });
+  }
+
+}

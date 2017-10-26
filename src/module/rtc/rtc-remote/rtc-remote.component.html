@@ -1,0 +1,9 @@
+<div class="media-box" [style.width.px]="width" [style.height.px]="height" [class.full]="boxFull" #mediaBox (click)="switchFullView($event,mediaBox)">
+  <!-- <video autoplay #selfVideo></video> -->
+  <video autoplay #remoteVideo></video>
+  <div class="action-bar" *ngIf="boxFull">
+    <div class="btn " (click)="toggleAudio()">audio</div>
+    <div class="btn " (click)="toggleVideo()">video</div>
+    <div class="btn " (click)="switchNormalView()">X</div>
+  </div>
+</div>

@@ -1,0 +1,78 @@
+:host{
+  display: block;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+video{
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #aaa;
+  object-fit: cover;
+  transform: scale(-1, 1);
+}
+
+.control{
+  $height: 180px;
+  $top-height: 45px;
+
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: $height;
+  background-color: rgba(10,10,10,0.1);
+  color: #fff;
+
+  
+
+  .top-bar{
+    height: $top-height;
+    line-height: $top-height;
+    border-bottom: solid #eee 1px;
+    text-align: justify;
+    font-size: $top-height - 20px;
+
+    i{
+      padding: 0 20px;
+    }
+
+    & > *{
+      display: inline-block;
+    }
+
+    &:after{
+      content: '';
+      width: 100%;
+      display: inline-block;
+    }
+  }
+
+  .bottom-bar{
+    height: $height - $top-height;
+    line-height: $height - $top-height - 10px;
+    text-align: center;
+    font-size: 40px;
+
+    .control-btn{
+      display: inline-block;
+      width: 70px;
+      height: 70px;
+      line-height: 70px;
+      border-radius: 50%;
+      border: solid 2px #fff;
+      text-align: center;
+      font-size: 45px;
+    }
+
+    & > *{
+      vertical-align: middle;
+    }
+
+  }
+}
