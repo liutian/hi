@@ -33,7 +33,7 @@ export class RtcLocalComponent implements OnInit, AfterViewInit, OnDestroy {
     if (this.localMedia.stream) {
       this.videoView.nativeElement.srcObject = this.localMedia.stream;
     } else {
-      this.peerService.getLocalMedia({ mediaMode: this.mediaMode }).then((stream) => {
+      this.peerService.getLocalMediaStream({ mediaMode: this.mediaMode }).then((stream) => {
         this.videoView.nativeElement.srcObject = stream;
       });
     }
@@ -47,7 +47,7 @@ export class RtcLocalComponent implements OnInit, AfterViewInit, OnDestroy {
     if (this.localMedia.status === 'sending') {
       this.stop();
     }
-    this.peerService.getLocalMedia({ videoDeviceChange: true }).then((stream: MediaStream) => {
+    this.peerService.getLocalMediaStream({ videoDeviceChange: true }).then((stream: MediaStream) => {
       this.videoView.nativeElement.srcObject = stream;
     });
   }
@@ -56,7 +56,7 @@ export class RtcLocalComponent implements OnInit, AfterViewInit, OnDestroy {
     if (this.localMedia.status === 'sending') {
       this.stop();
     }
-    this.peerService.getLocalMedia({ mediaMode: mediaMode }).then((stream: MediaStream) => {
+    this.peerService.getLocalMediaStream({ mediaMode: mediaMode }).then((stream: MediaStream) => {
       this.videoView.nativeElement.srcObject = stream;
     });
   }

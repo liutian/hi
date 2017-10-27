@@ -145,7 +145,7 @@ export class TalkComponent implements OnInit, OnDestroy {
       this.addRoom('hi');
       this.peerService.fetchMedia(this.room);
 
-      this.peerService.on('removemedia', (e) => {
+      this.peerService.on('stopmedia', (e) => {
         if (this.mediaList.includes(e.key)) {
           this.mediaList.splice(this.mediaList.indexOf(e.key), 1);
         }
@@ -155,7 +155,7 @@ export class TalkComponent implements OnInit, OnDestroy {
         e.agree();
       });
 
-      this.peerService.on('receivemedia', (e) => {
+      this.peerService.on('startmedia', (e) => {
         this.mediaList.push(e.key);
       });
 
@@ -175,8 +175,9 @@ export class TalkComponent implements OnInit, OnDestroy {
         this.messages.push(e.pushData);
         if (e.pushData.contentType === 'image') {
           this.downloadImage(e.pushData);
+        } else {
+          this.peerService.sendMessage(e.pushData.from, '你是谁');
         }
-        this.peerService.sendMessage(e.pushData.from, '你是谁');
       });
 
     }, (e) => {

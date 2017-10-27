@@ -7,8 +7,8 @@ import { EventEmit } from './event-emit';
 @Injectable()
 export class PeerService extends EventEmit {
   // 可触发的事件：channelerror(messageChannel报错) message(messageChannel接收到消息)
-  // sharemedia(对端请求主动共享媒体流) receivemedia(准备接收对端的媒体流) newmedia(接收到对端的媒体流) removemedia(移除媒体流)
-  // receivedata(数据通道接收到数据) peerremove(对端连接移除)
+  // sharemedia(对端请求主动共享媒体流) startmedia(准备接收对端的媒体流) newmedia(接收到对端的媒体流) stopmedia(移除媒体流)
+  // receivedata(数据通道接收到数据)
 
   // 本地媒体流相关的属性
   public localMedia = {
@@ -27,8 +27,8 @@ export class PeerService extends EventEmit {
   private key: string;
   // 通过该对象来实现信令协商，建立对等连接之前的信息交换
   private socket;
-  // 缓存所有对等连接
-  private peerMap = new Map<string, RTCPeerConnection>();
+  // 缓存非媒体流对等连接
+  private nomediaPeerMap = new Map<string, RTCPeerConnection>();
   // 只缓存传输媒体流的对等连接
   private mediaPeerMap = new Map<string, RTCPeerConnection>();
   // 缓存对等连接对应的校验码，方便后续向对等连接发起offer
@@ -38,7 +38,7 @@ export class PeerService extends EventEmit {
   // 缓存消息通道
   private sendMessageChannelMap = new Map<string, any>();
   // 缓存消息通道建立之前的需要发送出去的数据
-  private channelMessageBufferMap = new Map<string, any[]>();
+  private messageChannelBufferMap = new Map<string, any[]>();
   // 缓存本地协商信息
   private icecandidateBufferMap = new Map<string, any[]>();
   private icecandidateBufferTimeoutMap = new Map<string, any>();
@@ -142,9 +142,9 @@ export class PeerService extends EventEmit {
     let channel = this.sendMessageChannelMap.get(remoteKey);
     if (!channel) {
       channel = this.createMessageChannel(remoteKey);
-      this.channelMessageBufferMap.set(remoteKey, [data]);
+      this.messageChannelBufferMap.set(remoteKey, [data]);
     } else if (channel.readyState === 'connecting') {
-      this.channelMessageBufferMap.get(remoteKey).push(data);
+      this.messageChannelBufferMap.get(remoteKey).push(data);
     } else if (channel.readyState === 'open') {
       channel.send(data);
     } else {
@@ -171,7 +171,7 @@ export class PeerService extends EventEmit {
   }
 
   // 获取本地摄像头，通过传递不同的参数来重新设置本地媒体流
-  public getLocalMedia({ mediaMode, videoDeviceChange }: any): Promise<MediaStream> {
+  public getLocalMediaStream({ mediaMode, videoDeviceChange }: any): Promise<MediaStream> {
     // 获取本地媒体流的同时获取本地媒体设备信息
     if (!this.localMedia.devices) {
       this.enumerateDevices();
@@ -212,16 +212,23 @@ export class PeerService extends EventEmit {
   // 关闭所有对端连接
   public closeAllPeer() {
     this.stopMedia();
-    Array.from(this.peerMap.keys()).forEach(key => {
-      this.peerMap.get(key).close();
+    Array.from(this.nomediaPeerMap.keys()).forEach(key => {
+      this.nomediaPeerMap.get(key).close();
       this.removePeer(key);
     });
+    this.nomediaPeerMap.clear();
+    this.peerAuthMap.clear();
+    this.icecandidateBufferMap.clear();
+    this.icecandidateBufferTimeoutMap.forEach((timeout) => {
+      window.clearTimeout(timeout);
+    });
+    this.icecandidateBufferTimeoutMap.clear();
   }
 
   private createMessageChannel(remoteKey) {
-    let peer = this.peerMap.get(remoteKey);
+    let peer = this.nomediaPeerMap.get(remoteKey);
     if (!peer) {
-      peer = this.createPeer(remoteKey);
+      peer = this.createPeer(remoteKey, 'message');
       this.socket.push({
         pushData: {
           peer: true,
@@ -239,7 +246,7 @@ export class PeerService extends EventEmit {
   private setMessageChannel(remoteKey, channel) {
 
     this.sendMessageChannelMap.set(remoteKey, channel);
-    this.channelMessageBufferMap.set(remoteKey, []);
+    this.messageChannelBufferMap.set(remoteKey, []);
     channel.addEventListener('NetworkError', (e) => {
       this.emit('channelerror', e);
     });
@@ -249,7 +256,7 @@ export class PeerService extends EventEmit {
     });
 
     channel.addEventListener('open', () => {
-      const messageBuffer = this.channelMessageBufferMap.get(remoteKey);
+      const messageBuffer = this.messageChannelBufferMap.get(remoteKey);
       messageBuffer.forEach((message) => {
         channel.send(message);
       });
@@ -386,7 +393,7 @@ export class PeerService extends EventEmit {
       return;
     }
 
-    const peer = this.peerMap.get(pushData.from);
+    let peer = pushData.channel === 'media' ? this.mediaPeerMap.get(pushData.from) : this.nomediaPeerMap.get(pushData.from);
     if (pushData.type === 'preOffer') {// 对端请求主动建立连接
       if (pushData.channel === 'media') {// 只有媒体类型的对等数据传输需要用户同意，数据块和数据流不需要
         this.emit('sharemedia', {
@@ -407,11 +414,11 @@ export class PeerService extends EventEmit {
       }
 
       if (!peer) {
-        this.createPeer(pushData.from);
+        peer = this.createPeer(pushData.from, pushData.channel);
       }
-      this.createAnswer(pushData.from, pushData.data);
+      this.createAnswer(pushData.from, pushData.data, pushData.channel);
       if (pushData.channel === 'media') {
-        this.emit('receivemedia', {
+        this.emit('startmedia', {
           key: pushData.from
         });
       }
@@ -440,23 +447,24 @@ export class PeerService extends EventEmit {
         });
       });
     } else if (pushData.type === 'closeMedia' && peer) {// 收到关闭对等连接的请求
-      this.removePeer(pushData.from);
-      peer.close();
-      this.emit('removemedia', {
+      this.emit('stopmedia', {
         key: pushData.from,
         peer: peer
       });
+      this.removePeer(pushData.from, 'media');
+      peer.close();
     }
   }
 
   private closeMediaPeers() {
     Array.from(this.mediaPeerMap.keys()).forEach(key => {
       this.mediaPeerMap.get(key).close();
-      this.removePeer(key);
+      this.removePeer(key, 'media');
       this.socket.push({// danger frequent
         pushData: {
           peer: true,
-          type: 'closeMedia'
+          type: 'closeMedia',
+          channel: 'media'
         }
       }, key);
     });
@@ -469,9 +477,9 @@ export class PeerService extends EventEmit {
       return;
     }
 
-    let peer = this.peerMap.get(pushData.from);
+    let peer = pushData.channel === 'media' ? this.mediaPeerMap.get(pushData.from) : this.nomediaPeerMap.get(pushData.from);
     if (!peer) {
-      peer = this.createPeer(pushData.from);
+      peer = this.createPeer(pushData.from, pushData.channel);
     }
     this.peerAuthMap.set(pushData.from, pushData.auth);
 
@@ -524,7 +532,7 @@ export class PeerService extends EventEmit {
 
   // 发起Offer
   private createOffer(remoteKey: string, channel: string) {
-    const peer = this.peerMap.get(remoteKey);
+    const peer = channel === 'media' ? this.mediaPeerMap.get(remoteKey) : this.nomediaPeerMap.get(remoteKey);
     // 创建offer
     peer.createOffer().then((offer) => {
       // 将offer设置localDescription
@@ -548,8 +556,8 @@ export class PeerService extends EventEmit {
   }
 
   // 回复answer
-  private createAnswer(remoteKey: string, offer) {
-    const peer = this.peerMap.get(remoteKey);
+  private createAnswer(remoteKey: string, offer, channel: string) {
+    const peer = channel === 'media' ? this.mediaPeerMap.get(remoteKey) : this.nomediaPeerMap.get(remoteKey);
     // 首先将远程的offer设置为remoteDescription
     peer.setRemoteDescription(offer).then(() => {
       // 接着创建answer
@@ -561,7 +569,8 @@ export class PeerService extends EventEmit {
             pushData: {
               peer: true,
               type: 'answer',
-              data: answer
+              data: answer,
+              channel: channel
             }
           }, remoteKey);
         }).catch((e) => {
@@ -577,11 +586,10 @@ export class PeerService extends EventEmit {
   }
 
   // 建立和远端的对等链接
-  private createPeer(remoteKey) {
+  private createPeer(remoteKey, channel) {
     // 初始化peer实例
     const peer = new RTCPeerConnection(this.option.peerConfig);
-    this.peerMap.set(remoteKey, peer);
-    this.mediaPeerMap.delete(remoteKey);
+    channel === 'media' ? this.mediaPeerMap.set(remoteKey, peer) : this.nomediaPeerMap.set(remoteKey, peer);
 
     // 远程连接创建了一个数据通道
     peer.addEventListener('datachannel', (e: any) => {
@@ -594,7 +602,7 @@ export class PeerService extends EventEmit {
 
     // 监听关闭事件
     peer.addEventListener('close', (e) => {
-      this.removePeer(remoteKey);
+      this.removePeer(remoteKey, channel);
     });
 
     peer.addEventListener('iceconnectionstatechange', (e) => {
@@ -602,7 +610,7 @@ export class PeerService extends EventEmit {
       console.log('peer iceconnectionstatechange : ' + peer.iceConnectionState);
       if (/(closed|failed)/ig.test(peer.iceConnectionState) && peer.signalingState !== 'closed') {
         peer.close();
-        this.removePeer(remoteKey);
+        this.removePeer(remoteKey, channel);
       }
     });
 
@@ -624,7 +632,7 @@ export class PeerService extends EventEmit {
     // 监听异常报错事件
     peer.addEventListener('error', (e) => {
       console.error('peer error ' + e);
-      this.removePeer(remoteKey);
+      this.removePeer(remoteKey, channel);
     });
 
     // 监听地址探测事件
@@ -650,6 +658,7 @@ export class PeerService extends EventEmit {
             peer: true,
             type: 'icecandidate',
             data: icecandidateArr,
+            channel: channel
           }
         }, remoteKey);
         icecandidateArr.length = 0;
@@ -674,22 +683,13 @@ export class PeerService extends EventEmit {
     return peer;
   }
 
-  private removePeer(key: string) {
-    if (this.peerMap.has(key)) {
-      const peer = this.peerMap.get(key);
-      this.emit('peerremove', {
-        key: key,
-        peer: peer
-      });
+  private removePeer(key: string, channel?: string) {
+    const map = channel === 'media' ? this.mediaPeerMap : this.nomediaPeerMap;
+    map.delete(key);
+    if (channel !== 'media') {
+      this.sendMessageChannelMap.delete(key);
+      this.messageChannelBufferMap.delete(key);
     }
-    this.peerMap.delete(key);
-    this.mediaPeerMap.delete(key);
-    this.peerAuthMap.delete(key);
-    this.sendMessageChannelMap.delete(key);
-    this.channelMessageBufferMap.delete(key);
-    this.icecandidateBufferMap.delete(key);
-    window.clearTimeout(this.icecandidateBufferTimeoutMap.get(key));
-    this.icecandidateBufferTimeoutMap.delete(key);
   }
 
   private removeMediaTracks(kind?) {
