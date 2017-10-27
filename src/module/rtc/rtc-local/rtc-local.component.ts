@@ -27,19 +27,13 @@ export class RtcLocalComponent implements OnInit, AfterViewInit, OnDestroy {
     this.videoView.nativeElement.muted = true;
 
     if ((this.room !== this.localMedia.room || this.mediaMode !== this.localMedia.mediaMode) && this.localMedia.stream) {
-      this.peerService.stopShareMediaStream();
+      this.peerService.stopMedia();
     }
 
     if (this.localMedia.stream) {
       this.videoView.nativeElement.srcObject = this.localMedia.stream;
     } else {
-      const constraints: any = {
-        // width: this.videoView.nativeElement.clientWidth,
-        // height: this.videoView.nativeElement.clientHeight,
-        mediaMode: this.mediaMode ? this.mediaMode : undefined
-      };
-
-      this.peerService.getLocalMedia(constraints).then((stream) => {
+      this.peerService.getLocalMedia({ mediaMode: this.mediaMode }).then((stream) => {
         this.videoView.nativeElement.srcObject = stream;
       });
     }
@@ -68,7 +62,7 @@ export class RtcLocalComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   run() {
-    this.peerService.shareMediaStream(this.room);
+    this.peerService.startMedia(this.room);
     this.timeout = setInterval(() => {
       this.runTime = this.calcRunTime();
     }, 1000);
@@ -77,7 +71,7 @@ export class RtcLocalComponent implements OnInit, AfterViewInit, OnDestroy {
   stop() {
     clearInterval(this.timeout);
     this.runTime = '00:00:00';
-    this.peerService.stopShareMediaStream();
+    this.peerService.stopMedia();
   }
 
   calcRunTime() {

@@ -20,8 +20,6 @@ export class SocketService {
         const url = serverUrl + namespace + '?userid=' + userid + '&uuid=' + uuid + '&platform=' + platform;
         const socket = window.io.connect(url, option);
         const key = userid + this.separator + uuid;
-        // socket._userid = userid;
-        // socket._uuid = uuid;
         socket.push = (data: { room?: string, pushData: any }, target?: string) => {
           const postData = Object.assign(data);
           postData.except = socketId;
@@ -64,7 +62,7 @@ export class SocketService {
     });
   }
 
-  parseUserRoom(key) {
+  private parseUserRoom(key) {
     return 'user_' + key.split(this.separator)[0];
   }
 

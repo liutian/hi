@@ -44,12 +44,6 @@ export class TalkComponent implements OnInit, OnDestroy {
 
     this.fileIdPrefix = Number.prototype.toString.call(Math.floor(Math.random() * 10000000), 36);
     this.initSocket();
-
-    this.peerService.on('peerremove', (e) => {
-      if (this.mediaList.includes(e.key)) {
-        this.mediaList.splice(this.mediaList.indexOf(e.key), 1);
-      }
-    });
   }
 
   ngOnInit() {
@@ -151,11 +145,17 @@ export class TalkComponent implements OnInit, OnDestroy {
       this.addRoom('hi');
       this.peerService.fetchMedia(this.room);
 
+      this.peerService.on('removemedia', (e) => {
+        if (this.mediaList.includes(e.key)) {
+          this.mediaList.splice(this.mediaList.indexOf(e.key), 1);
+        }
+      });
+
       this.peerService.on('sharemedia', (e) => {
         e.agree();
       });
 
-      this.peerService.on('readyforsharemedia', (e) => {
+      this.peerService.on('receivemedia', (e) => {
         this.mediaList.push(e.key);
       });
 
@@ -165,7 +165,6 @@ export class TalkComponent implements OnInit, OnDestroy {
 
       this.peerService.on('message', (e) => {
         alert(e.message);
-        this.peerService.sendMessage(e.key, '我是你妹');
       });
 
       this.socket.on('push', (e) => {

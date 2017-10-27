@@ -10,7 +10,6 @@ export class RtcRemoteComponent implements OnInit, OnDestroy, AfterViewInit {
   @Input() width: number;
   @Input() height: number;
   @Input() key: string;
-  // @ViewChild('selfVideo') selfVideo: ElementRef;
   @ViewChild('remoteVideo') remoteVideo: ElementRef;
   boxFull = false;
   private peer: RTCPeerConnection;
@@ -29,8 +28,8 @@ export class RtcRemoteComponent implements OnInit, OnDestroy, AfterViewInit {
 
   ngAfterViewInit() {
     this.peerService.on('newmedia', (e) => {
-      console.log('rtc-remote newmedia: ' + e.key);
       if (e.key === this.key) {
+        this.peer = e.peer;
         this.remoteVideo.nativeElement.srcObject = e.stream;
       }
     });

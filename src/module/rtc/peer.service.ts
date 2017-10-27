@@ -7,44 +7,49 @@ import { EventEmit } from './event-emit';
 @Injectable()
 export class PeerService extends EventEmit {
   // 可触发的事件：channelerror(messageChannel报错) message(messageChannel接收到消息)
-  // sharemedia(对端请求共享媒体流) newmedia(新的对端媒体流加入) peerremove(对端连接移除)
-  // receivedata(数据通道接收到数据)
+  // sharemedia(对端请求主动共享媒体流) receivemedia(准备接收对端的媒体流) newmedia(接收到对端的媒体流) removemedia(移除媒体流)
+  // receivedata(数据通道接收到数据) peerremove(对端连接移除)
 
   // 本地媒体流相关的属性
   public localMedia = {
-    videoDeviceId: undefined,
-    devices: null,
-    status: 'stop',
-    isMute: false,
-    stream: null,
-    startTime: 0,
-    mediaMode: 'video',
-    room: '',
-    width: null,
-    height: null,
-    aspectRatio: undefined
+    videoDeviceId: undefined, // 用于切换摄像头
+    devices: null, // 通过遍历这个设备列表来实现切换摄像头的功能
+    status: 'stop', // 标示当前是否在分享本地媒体流
+    isMute: false, // 当前是否静音
+    stream: null, // 本地媒体流对象
+    startTime: 0, // 开始分享的时间
+    mediaMode: 'video', // 分享模式：音视频/纯音频
+    room: '', // 在哪个房间分享
   };
-  // 当对端要发起offer时，携带的校验码，如果不一致则直接拒绝
+  // 当接收到对端发起offer时，携带的校验码要与auth一致否则直接拒绝，防止恶意请求
   public readonly auth = this.random();
-  // 对外建立对等连接时唯一标示
+  // 唯一标示，特征值
   private key: string;
-  // 通过该对象来实现信令协商
+  // 通过该对象来实现信令协商，建立对等连接之前的信息交换
   private socket;
-  // 保存所有对等连接
+  // 缓存所有对等连接
   private peerMap = new Map<string, RTCPeerConnection>();
-  // 只保存需要传输媒体流的对等连接
+  // 只缓存传输媒体流的对等连接
   private mediaPeerMap = new Map<string, RTCPeerConnection>();
-  // 保存对等连接对应的校验码
+  // 缓存对等连接对应的校验码，方便后续向对等连接发起offer
   private peerAuthMap = new Map<string, string>();
+  // 请求对端发送指定数据时的回调函数，用来处理数据发送完成或者失败的回调
   private fetchDataCallbackMap = new Map<string, any[]>();
+  // 缓存消息通道
   private sendMessageChannelMap = new Map<string, any>();
+  // 缓存消息通道建立之前的需要发送出去的数据
   private channelMessageBufferMap = new Map<string, any[]>();
+  // 缓存本地协商信息
   private icecandidateBufferMap = new Map<string, any[]>();
   private icecandidateBufferTimeoutMap = new Map<string, any>();
   // 配置选项
-  private option: {
-    peerConfig: any
-  } | any;
+  private option: any = {
+    iceServers: [{
+      urls: 'stun:stun.l.google.com:19302'
+    }, {
+      urls: 'stun:global.stun.twilio.com:3478?transport=udp'
+    }]
+  };
   // 本地数据仓库
   private dataStore = new Map();
   private dataChannelPrefix = 'data';
@@ -59,23 +64,17 @@ export class PeerService extends EventEmit {
   public setup(key: string, socket: { on: Function, push: Function }, option = {}) {
     this.key = key;
     this.socket = socket;
-    this.option = Object.assign({
-      iceServers: [{
-        urls: 'stun:stun.l.google.com:19302'
-      }, {
-        urls: 'stun:global.stun.twilio.com:3478?transport=udp'
-      }
-      ]
-    }, option);
+    this.option = Object.assign(this.option, option);
     socket.on('push', this.socketPushListener.bind(this));
   }
 
+  // 缓存数据块，便于发送数据块时直接查找
   public addData(dataId, data) {
     this.dataStore.set(dataId, data);
   }
 
   // 在某个房间中共享本地媒体信息
-  public shareMediaStream(room) {
+  public startMedia(room) {
     if (!room) {
       throw new Error('there no room');
     }
@@ -98,7 +97,15 @@ export class PeerService extends EventEmit {
     });
   }
 
-  // 主动从对端接收数据
+  // 停止共享本地媒体信息
+  public stopMedia() {
+    this.localMedia.startTime = 0;
+    this.localMedia.status = 'stop';
+    this.localMedia.isMute = false;
+    this.closeMediaPeers();
+  }
+
+  // 主动从对端接收数据，可断点续传
   public fetchData(remoteKey, dataId, size, offset = 0, channelConfig = {}): Promise<any[]> {
     this.socket.push({// danger frequent
       pushData: {
@@ -131,18 +138,11 @@ export class PeerService extends EventEmit {
     });
   }
 
-  // 停止共享本地媒体信息
-  public stopShareMediaStream() {
-    this.localMedia.startTime = 0;
-    this.closeMediaPeers();
-    this.localMedia.status = 'stop';
-  }
-
   public sendMessage(remoteKey, data) {
     let channel = this.sendMessageChannelMap.get(remoteKey);
     if (!channel) {
       channel = this.createMessageChannel(remoteKey);
-      this.channelMessageBufferMap.get(remoteKey).push(data);
+      this.channelMessageBufferMap.set(remoteKey, [data]);
     } else if (channel.readyState === 'connecting') {
       this.channelMessageBufferMap.get(remoteKey).push(data);
     } else if (channel.readyState === 'open') {
@@ -171,13 +171,13 @@ export class PeerService extends EventEmit {
   }
 
   // 获取本地摄像头，通过传递不同的参数来重新设置本地媒体流
-  public getLocalMedia({ mediaMode, videoDeviceChange, aspectRatio, width, height }: any): Promise<MediaStream> {
+  public getLocalMedia({ mediaMode, videoDeviceChange }: any): Promise<MediaStream> {
     // 获取本地媒体流的同时获取本地媒体设备信息
     if (!this.localMedia.devices) {
       this.enumerateDevices();
     }
     if (this.localMedia.stream) {
-      this.stopShareMediaStream();
+      this.stopMedia();
     }
 
     if (mediaMode) {
@@ -195,18 +195,8 @@ export class PeerService extends EventEmit {
       }
       this.localMedia.videoDeviceId = devices[(index + 1) % devices.length].deviceId;
     }
-    if (aspectRatio) {
-      this.localMedia.aspectRatio = aspectRatio;
-    }
-    if (width) {
-      this.localMedia.width = { ideal: width };
-    }
-    if (height) {
-      this.localMedia.height = { ideal: height };
-    }
 
-    const constraints = this.createConstraints(this.localMedia.mediaMode, this.localMedia.videoDeviceId,
-      this.localMedia.aspectRatio, this.localMedia.width, this.localMedia.height);
+    const constraints = this.createConstraints(this.localMedia.mediaMode, this.localMedia.videoDeviceId);
     return navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
       this.localMedia.stream = stream;
       return stream;
@@ -221,7 +211,7 @@ export class PeerService extends EventEmit {
 
   // 关闭所有对端连接
   public closeAllPeer() {
-    this.stopShareMediaStream();
+    this.stopMedia();
     Array.from(this.peerMap.keys()).forEach(key => {
       this.peerMap.get(key).close();
       this.removePeer(key);
@@ -279,11 +269,8 @@ export class PeerService extends EventEmit {
     return channelLabel.startsWith(this.dataChannelPrefix);
   }
 
+  // 发送数据
   private initSendData(channel, dataId?, offset?): Promise<undefined> {
-    if (!this.isDataChannel(channel.label) || channel.label.split('-').length !== 3) {
-      throw new Error('this is not transfer channel');
-    }
-
     if (!dataId) {
       dataId = channel.label.split('-')[1];
     }
@@ -310,10 +297,11 @@ export class PeerService extends EventEmit {
         } else {
           reader.abort();
           reader = null;
-          window.setTimeout(() => {
-            channel.close();
-            resolve();
-          }, 1000);
+          // 延迟1秒关闭连接，防止数据还未发送到对端
+          // window.setTimeout(() => { // mark
+          channel.close();
+          resolve();
+          // }, 1000);
         }
       });
 
@@ -333,13 +321,15 @@ export class PeerService extends EventEmit {
     });
   }
 
+  // 接收数据
   private receiveData(channel, remoteKey, fileId, channelSize) {
     let receiveBuffer = [];
     let currSize = 0;
     const [resolve, reject] = this.fetchDataCallbackMap.get(remoteKey + '-' + fileId);
     this.fetchDataCallbackMap.delete(remoteKey + '-' + fileId);
+    // 当超过指定时间还未开始数据接收则判定为操作失败
     const openTimeout = window.setTimeout(() => {
-      reject(new Error('open timeout'));
+      reject(new Error('channel open timeout'));
     }, 10000);
 
     channel.addEventListener('open', (e) => {
@@ -348,13 +338,18 @@ export class PeerService extends EventEmit {
 
     channel.addEventListener('message', (e) => {
       currSize += e.data.byteLength;
+      receiveBuffer.push(e.data);
       this.emit('receivedata', {
         key: remoteKey,
         fileId: fileId,
         size: currSize,
         scale: currSize / channelSize
       });
-      receiveBuffer.push(e.data);
+      if (currSize >= channelSize) {
+        resolve(receiveBuffer);
+        receiveBuffer = null;
+        channel.close();
+      }
     });
 
     channel.addEventListener('error' , (e) => {
@@ -382,23 +377,18 @@ export class PeerService extends EventEmit {
         channelSize: pushData.channelSize
       }
     }, pushData.from);
-
-    // const peer = this.peerMap.get(pushData.from);
-    // // 如果发现自己是offer，则主动createOffer
-    // if (peer && peer.localDescription.type === 'offer') {
-    //   this.createOffer(pushData.from);
-    // }
   }
 
   private socketPushListener(event) {
     const pushData = event.pushData;
+    // 排除不相关的推送数据
     if (!pushData || !pushData.peer || (pushData.target && pushData.target !== this.key)) {
       return;
     }
 
     const peer = this.peerMap.get(pushData.from);
-    if (pushData.type === 'preOffer') {// 接收到对端请求createOffer的请求
-      if (pushData.channel === 'media') {// 只有媒体类型需要用户同意，数据块和数据流不需要
+    if (pushData.type === 'preOffer') {// 对端请求主动建立连接
+      if (pushData.channel === 'media') {// 只有媒体类型的对等数据传输需要用户同意，数据块和数据流不需要
         this.emit('sharemedia', {
           agree: () => {
             this.agreeOffer(pushData);
@@ -408,7 +398,7 @@ export class PeerService extends EventEmit {
       } else {
         this.agreeOffer(pushData);
       }
-    } else if (pushData.type === 'offerConfirm') {// 收到确认可以发起offer的请求
+    } else if (pushData.type === 'offerConfirm') {// 对端同意建立对等连接
       this.startOffer(pushData);
     } else if (pushData.type === 'offer') {// 接收到offer
       if (pushData.auth !== this.auth) {
@@ -421,7 +411,7 @@ export class PeerService extends EventEmit {
       }
       this.createAnswer(pushData.from, pushData.data);
       if (pushData.channel === 'media') {
-        this.emit('readyforsharemedia', {
+        this.emit('receivemedia', {
           key: pushData.from
         });
       }
@@ -450,8 +440,12 @@ export class PeerService extends EventEmit {
         });
       });
     } else if (pushData.type === 'closeMedia' && peer) {// 收到关闭对等连接的请求
-      peer.close();
       this.removePeer(pushData.from);
+      peer.close();
+      this.emit('removemedia', {
+        key: pushData.from,
+        peer: peer
+      });
     }
   }
 
@@ -466,8 +460,10 @@ export class PeerService extends EventEmit {
         }
       }, key);
     });
+    this.mediaPeerMap.clear();
   }
 
+  // 创建offer前的准备工作
   private startOffer(pushData) {
     if (pushData.channel === 'media' && (!this.localMedia.stream || this.localMedia.status !== 'sending')) {
       return;
@@ -495,13 +491,10 @@ export class PeerService extends EventEmit {
       this.receiveData(channel, pushData.from, pushData.channelLabel.split('-')[1], pushData.channelSize);
     }
 
-    // offer/answer 在peer创建之初就确定下来，如果是answer 即使是接收到 offerConfirm 也不createOffer, 对端的peer会主动createOffer
-    // if (!peer.localDescription.type || peer.localDescription.type === 'offer') {
     this.createOffer(pushData.from, pushData.channel);
-    // }
   }
 
-  private createConstraints(mediaMode, videoDeviceId, aspectRatio, width, height) {
+  private createConstraints(mediaMode, videoDeviceId) {
     const constraints: any = {
       video: {
         frameRate: 30
@@ -518,17 +511,8 @@ export class PeerService extends EventEmit {
     };
 
     if (mediaMode === 'video') {
-      if (aspectRatio) {
-        constraints.video.aspectRatio = aspectRatio;
-      }
       if (videoDeviceId) {
         constraints.video.deviceId = { exact: videoDeviceId };
-      }
-      if (width) {
-        constraints.video.width = { exact: width };
-      }
-      if (height) {
-        constraints.video.height = { exact: height };
       }
     } else if (mediaMode === 'audio') {
       constraints.video = false;
@@ -594,12 +578,10 @@ export class PeerService extends EventEmit {
 
   // 建立和远端的对等链接
   private createPeer(remoteKey) {
-    if (this.peerMap.has(remoteKey)) {
-      return this.peerMap.get(remoteKey);
-    }
     // 初始化peer实例
     const peer = new RTCPeerConnection(this.option.peerConfig);
     this.peerMap.set(remoteKey, peer);
+    this.mediaPeerMap.delete(remoteKey);
 
     // 远程连接创建了一个数据通道
     peer.addEventListener('datachannel', (e: any) => {
@@ -678,11 +660,6 @@ export class PeerService extends EventEmit {
     // 监听地址变化事件
     peer.addEventListener('negotiationneeded', (e) => {// mark
       // console.info('negotiationneeded');
-      // if (!peer.localDescription.sdp || peer.localDescription.type === 'offer') {
-      //   this.createOffer(key);
-      // } else if (peer.localDescription.type === 'answer') {
-      //   this.createAnswer(key, peer.remoteDescription);
-      // }
     });
 
     // 监听对端音视频变化
@@ -708,6 +685,11 @@ export class PeerService extends EventEmit {
     this.peerMap.delete(key);
     this.mediaPeerMap.delete(key);
     this.peerAuthMap.delete(key);
+    this.sendMessageChannelMap.delete(key);
+    this.channelMessageBufferMap.delete(key);
+    this.icecandidateBufferMap.delete(key);
+    window.clearTimeout(this.icecandidateBufferTimeoutMap.get(key));
+    this.icecandidateBufferTimeoutMap.delete(key);
   }
 
   private removeMediaTracks(kind?) {
@@ -751,19 +733,22 @@ export class PeerService extends EventEmit {
   private addMediaTracks(kind?) {
     Array.from(this.mediaPeerMap.keys()).forEach((key) => {
       const peer = this.mediaPeerMap.get(key);
+      let tracks = [];
       if (kind === 'audio') {
-        this.localMedia.stream.getAudioTracks().forEach(track => {
-          peer.addTrack(track, this.localMedia.stream);
-        });
+        tracks = this.localMedia.stream.getAudioTracks();
       } else if (kind === 'video') {
-        this.localMedia.stream.getVideoTracks().forEach(track => {
-          peer.addTrack(track, this.localMedia.stream);
-        });
-      } else if (kind === undefined) {
-        this.localMedia.stream.getTracks().forEach(track => {
-          peer.addTrack(track, this.localMedia.stream);
-        });
+        tracks = this.localMedia.stream.getVideoTracks();
+      } else if (!kind) {
+        tracks = this.localMedia.stream.getTracks();
       }
+
+      tracks.forEach(track => {
+        try {// 异常处理，防止在共享视频时提前静音然后共享后在取消静音导致的报错
+          peer.addTrack(track, this.localMedia.stream);
+        } catch (e) {
+          console.log('add Track error ' + e);
+        }
+      });
     });
   }
 

@@ -13,7 +13,6 @@
           {{item.content}}
         </div>
         <div *ngIf="item.contentType === 'image'">
-          <!-- <img src="default.png" *ngIf="!item.download"> -->
           <img [src]="item.content" *ngIf="item.download">
         </div>
       </div>
